@@ -263,7 +263,8 @@ kernel void kernel_flash_attn_ext_vec(
             {
                 bool any_finite = false;
                 FOR_UNROLL (short qq = 0; qq < Q; ++qq) {
-                    if (simd_max(sm[qq*C + tiisg]) > -MAXHALF) {
+                    // AMD RDNA can reduce half -INF incorrectly when mixed with finite values.
+                    if (simd_max(float(sm[qq*C + tiisg])) > -65504.0f) {
                         any_finite = true;
                     }
                 }
