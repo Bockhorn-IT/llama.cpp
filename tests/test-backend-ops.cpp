@@ -11824,6 +11824,64 @@ static bool op_names_filter_selects(const char * op_names_filter, const char * o
     return false;
 }
 
+static test_status_t run_metal_buffer_io(ggml_backend_t backend, ggml_backend_dev_t dev, const char * op_names_filter) {
+    if (strncmp(ggml_backend_dev_name(dev), "MTL", 3) != 0 || !op_names_filter_selects(op_names_filter, "BUFFER_IO")) {
+        return test_status_t::SKIPPED;
+    }
+
+    ggml_backend_buffer_type_t buft = ggml_backend_dev_buffer_type(dev);
+    const std::string expected_name = std::string(ggml_backend_dev_name(dev)) + "_Private";
+    if (expected_name != ggml_backend_buft_name(buft)) {
+        printf("  Metal buffer I/O: SKIPPED (default buffer is not private)\n");
+        return test_status_t::SKIPPED;
+    }
+
+    ggml_init_params params = { ggml_tensor_overhead() * 3, nullptr, true };
+    ggml_context_ptr ctx(ggml_init(params));
+    if (!ctx) {
+        return test_status_t::FAIL;
+    }
+
+    ggml_tensor * prefix = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I8, 64);
+    ggml_tensor * tensor = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I8, 64);
+    ggml_backend_buffer_ptr buffer(ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft));
+    if (!buffer) {
+        return test_status_t::FAIL;
+    }
+
+    std::array<uint8_t, 66> source;
+    std::array<uint8_t, 66> actual;
+    std::array<uint8_t, 64> expected;
+    source.fill(0);
+    actual.fill(0xdd);
+    expected.fill(0x3c);
+    for (size_t i = 0; i < 13; ++i) {
+        source[i + 1] = uint8_t(i + 1);
+        expected[i + 7] = source[i + 1];
+    }
+    for (size_t i = 23; i < 27; ++i) {
+        expected[i] = 0xa5;
+    }
+
+    // Place the tensor at a nonzero buffer offset and preserve the preceding tensor.
+    ggml_backend_buffer_clear(buffer.get(), 0x3c);
+    ggml_backend_tensor_set(tensor, source.data() + 1, 7, 13);
+    ggml_backend_tensor_memset(tensor, 0xa5, 23, 4);
+    ggml_backend_tensor_set(tensor, nullptr, 64, 0);
+    ggml_backend_tensor_get(tensor, actual.data() + 1, 64, 0);
+    ggml_backend_tensor_memset(tensor, 0, 64, 0);
+    ggml_backend_tensor_get(tensor, actual.data() + 1, 0, 64);
+
+    std::array<uint8_t, 64> prefix_actual;
+    ggml_backend_tensor_get(prefix, prefix_actual.data(), 0, prefix_actual.size());
+    const bool ok = actual[0] == 0xdd && actual[65] == 0xdd &&
+                    std::equal(expected.begin(), expected.end(), actual.begin() + 1) &&
+                    std::all_of(prefix_actual.begin(), prefix_actual.end(), [](uint8_t value) { return value == 0x3c; });
+    printf("  Metal buffer I/O (%s): %s\n", ggml_backend_buft_name(ggml_backend_buffer_get_type(buffer.get())), ok ? "OK" : "FAIL");
+    GGML_UNUSED(backend);
+    return ok ? test_status_t::OK : test_status_t::FAIL;
+}
+
 // Covers padded rows, sinks, kvpad, multi-SIMDgroup reduction, quantized K/V, and MLA views.
 // The override is backend-global, so this runs after all parallel workers have joined.
 static bool run_fa_vec_slice(ggml_backend_t backend, ggml_backend_t backend_cpu, const char * op_names_filter) {
@@ -12018,6 +12076,16 @@ static bool test_backend(ggml_backend_t backend, ggml_backend_dev_t dev, test_mo
 
             if (workers_started == 0 && !test_cases.empty()) {
                 return false;
+            }
+        }
+
+        const test_status_t buffer_status = run_metal_buffer_io(backend, dev, op_names_filter);
+        if (buffer_status != test_status_t::SKIPPED) {
+            tests_run++;
+            if (buffer_status == test_status_t::OK) {
+                n_ok++;
+            } else {
+                failed_tests.push_back("BUFFER_IO");
             }
         }
 
