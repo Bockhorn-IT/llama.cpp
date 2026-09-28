@@ -686,6 +686,9 @@ static enum ggml_backend_dev_type ggml_backend_metal_device_get_type(ggml_backen
 }
 
 static void ggml_backend_metal_device_get_props(ggml_backend_dev_t dev, ggml_backend_dev_props * props) {
+    ggml_metal_device_t ctx_dev = (ggml_metal_device_t)dev->context;
+    const ggml_metal_device_props * props_dev = ggml_metal_device_get_props(ctx_dev);
+
     props->name        = ggml_backend_metal_device_get_name(dev);
     props->description = ggml_backend_metal_device_get_description(dev);
     props->type        = ggml_backend_metal_device_get_type(dev);
@@ -697,7 +700,7 @@ static void ggml_backend_metal_device_get_props(ggml_backend_dev_t dev, ggml_bac
         /* .host_buffer          = */ false,
         /* .buffer_from_host_ptr = */ true,
         /* .events               = */ true,
-        /* .mmap_support         = */ true,
+        /* .mmap_support         = */ props_dev->has_unified_memory,
     };
 }
 
