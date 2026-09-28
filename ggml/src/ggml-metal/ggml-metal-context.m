@@ -141,6 +141,12 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
 
         res->use_concurrency = getenv("GGML_METAL_CONCURRENCY_DISABLE") == nil;
 
+        // Concurrent dispatch is not reliable on discrete (non-UMA) AMD GPUs.
+        if (res->use_concurrency && !props_dev->has_unified_memory) {
+            GGML_LOG_WARN("%s: disabling concurrent dispatch (non-UMA correctness workaround)\n", __func__);
+            res->use_concurrency = false;
+        }
+
         {
             const char * val = getenv("GGML_METAL_GRAPH_DEBUG");
             res->debug_graph = val ? atoi(val) : 0;
