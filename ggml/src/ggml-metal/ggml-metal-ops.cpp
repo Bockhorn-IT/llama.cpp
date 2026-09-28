@@ -2449,6 +2449,8 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
 
     // first try to use small-batch mat-mv kernels
     // these should be efficient for BS [2, ~8]
+    // Experimental on the Radeon Pro 5600M; the measured Q4_K crossover starts at BS 14.
+    const bool use_extended_mul_mv = props_dev->is_amd_5600m && ne11 >= 14 && ne11 <= 512;
     if (op->src[1]->type == GGML_TYPE_F32 && (ne00%128 == 0) &&
         (
          (
@@ -2465,7 +2467,7 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
            op->src[0]->type == GGML_TYPE_Q8_0 ||
            op->src[0]->type == GGML_TYPE_MXFP4 ||
            op->src[0]->type == GGML_TYPE_IQ4_NL ||
-           false) && (ne11 >= 2 && ne11 <= 8)
+           false) && (ne11 >= 2 && (ne11 <= 8 || use_extended_mul_mv))
          ) ||
          (
           (
@@ -2474,7 +2476,7 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
            op->src[0]->type == GGML_TYPE_Q6_K ||
            op->src[0]->type == GGML_TYPE_Q2_K ||
            op->src[0]->type == GGML_TYPE_Q3_K ||
-           false) && (ne11 >= 4 && ne11 <= 8)
+           false) && (ne11 >= 4 && (ne11 <= 8 || use_extended_mul_mv))
          )
         )
        ) {
@@ -2516,7 +2518,7 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
             case 5:
                 r1ptg = 5; break;
             default:
-                GGML_ABORT("unsupported ne11");
+                r1ptg = 4; break;
         };
 
         auto pipeline = ggml_metal_library_get_pipeline_mul_mv_ext(lib, op, nsg, nxpsg, r1ptg);
