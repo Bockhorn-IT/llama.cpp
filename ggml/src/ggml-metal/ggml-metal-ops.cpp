@@ -3302,6 +3302,89 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
     ggml_metal_buffer_id bid_tmp = bid_blk;
     bid_tmp.offs += ggml_metal_op_flash_attn_ext_extra_blk(op);
 
+    // These dense F16 forms exceed the error tolerance on the 5600M vector path.
+    // Keep normal decode and sparse attention on the vector path.
+    const bool use_non_simdgroup_scalar =
+        op->src[1]->type == GGML_TYPE_F16 &&
+        ggml_metal_op_flash_attn_ext_n_kv_max_sparse(op) == 0 &&
+        ((ne00 == 576 && ne20 == 512) ||
+         (ne00 == 512 && ne20 == 512 && !has_mask) ||
+         (ne00 == 256 && ne20 == 256 && ne11 >= 4096 && ne01 > 1));
+    if (props_dev->is_amd_5600m &&
+        (!ggml_metal_op_flash_attn_ext_use_vec(op) || use_non_simdgroup_scalar)) {
+        const char * kernel_name = nullptr;
+        if (ne00 == 64) {
+            kernel_name = "kernel_flash_attn_ext_scalar_dk64_dv64";
+        } else if (ne00 == 128) {
+            kernel_name = "kernel_flash_attn_ext_scalar_dk128_dv128";
+        } else if (ne00 == 256) {
+            kernel_name = "kernel_flash_attn_ext_scalar_dk256_dv256";
+        } else if (ne00 == 512 && ne20 == 512) {
+            kernel_name = "kernel_flash_attn_ext_scalar_dk512_dv512";
+        } else if (ne00 == 576 && ne20 == 512) {
+            kernel_name = "kernel_flash_attn_ext_scalar_dk576_dv512";
+        } else {
+            GGML_ABORT("unsupported head sizes for scalar Flash Attention: dk=%d dv=%d", ne00, ne20);
+        }
+
+        auto pipeline = ggml_metal_library_compile_pipeline(lib, kernel_name, kernel_name, NULL);
+        GGML_ASSERT(pipeline.pipeline && "failed to compile scalar Flash Attention pipeline");
+
+        ggml_metal_kargs_flash_attn_ext args = {
+            /*.ne01          =*/ ne01,
+            /*.ne02          =*/ ne02,
+            /*.ne03          =*/ ne03,
+            /*.nb01          =*/ nb01,
+            /*.nb02          =*/ nb02,
+            /*.nb03          =*/ nb03,
+            /*.ne11          =*/ ne11,
+            /*.ne_12_2       =*/ ne12,
+            /*.ne_12_3       =*/ ne13,
+            /*.ns10          =*/ has_sinks ? 1 : 0,
+            /*.nb11          =*/ nb11,
+            /*.nb12          =*/ nb12,
+            /*.nb13          =*/ nb13,
+            /*.ns20          =*/ 0,
+            /*.nb21          =*/ nb21,
+            /*.nb22          =*/ nb22,
+            /*.nb23          =*/ nb23,
+            /*.ne31          =*/ ne31,
+            /*.ne32          =*/ ne32,
+            /*.ne33          =*/ ne33,
+            /*.nb31          =*/ nb31,
+            /*.nb32          =*/ nb32,
+            /*.nb33          =*/ nb33,
+            /*.ne1           =*/ ne1,
+            /*.ne2           =*/ ne2,
+            /*.ne3           =*/ ne3,
+            /*.scale         =*/ scale,
+            /*.max_bias      =*/ max_bias,
+            /*.m0            =*/ m0,
+            /*.m1            =*/ m1,
+            /*.n_head_log2   =*/ n_head_log2,
+            /*.logit_softcap =*/ logit_softcap,
+        };
+
+        ggml_metal_encoder_set_pipeline(enc, pipeline);
+        ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+        ggml_metal_encoder_set_buffer  (enc, bid_src0, 1);
+        ggml_metal_encoder_set_buffer  (enc, bid_src1, 2);
+        ggml_metal_encoder_set_buffer  (enc, bid_src2, 3);
+        ggml_metal_encoder_set_buffer  (enc, bid_src3, 4);
+        ggml_metal_encoder_set_buffer  (enc, bid_dst,  5);
+        ggml_metal_encoder_set_buffer  (enc, bid_src4, 6);
+
+        constexpr int nsg = 16; // sync with SCALAR_BN in fa_scalar.metal
+        constexpr int nth = 32;
+        constexpr int reduce_j = 4; // sync with SCALAR_REDUCE_J in fa_scalar.metal
+        const size_t smem = (2*nsg + reduce_j*nsg*nth)*sizeof(float);
+
+        ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
+        ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, nsg*nth, 1, 1);
+
+        return 1;
+    }
+
     ggml_metal_buffer_id bid_kv_f16 = bid_tmp;
     bid_kv_f16.offs += ggml_metal_op_flash_attn_ext_extra_tmp(op);
 

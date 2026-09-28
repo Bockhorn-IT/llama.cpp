@@ -1,5 +1,6 @@
 #import "ggml-metal-device.h"
 #import "ggml-metal-fusion.h"
+#import "ggml-metal-ops.h"
 
 #import "ggml-impl.h"
 #import "ggml-backend-impl.h"
@@ -111,6 +112,7 @@ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_wi
 //   ggml_metallib_<name>_{start,end} embed-symbol stem.
 #define GGML_METAL_LIBS \
     X(FA_AUX,          fa_aux)         \
+    X(FA_SCALAR,       fa_scalar)      \
     X(FA_F16,          fa_f16)         \
     X(FA_F32,          fa_f32)         \
     X(FA_Q4_0,         fa_q4_0)        \
@@ -1301,6 +1303,12 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
 
                 snprintf(dev->props.name, sizeof(dev->props.name), "%s%d", "MTL", device);
                 const char * gpu_name = [[dev->mtl_device name] UTF8String];
+                // Identify the validated Intel/Radeon combination for device-specific kernel selection.
+                dev->props.is_amd_5600m = TARGET_CPU_X86_64 &&
+                                           dev->props.has_simdgroup_reduction &&
+                                           !dev->props.has_simdgroup_mm &&
+                                           !dev->props.has_unified_memory &&
+                                           strcmp(gpu_name, "AMD Radeon Pro 5600M") == 0;
                 if (n_devices > 1) {
                     snprintf(dev->props.desc, sizeof(dev->props.desc), "%s (dev p%d/v%d)",
                              gpu_name, dev->props.device_phys, dev->props.device_virt);
@@ -1775,7 +1783,22 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                 default:
                     return false;
             }
-            return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
+            if (has_simdgroup_mm) {
+                return true;
+            }
+            // Enable vector FA only where the scalar corrections are also available.
+            if (!dev->props.is_amd_5600m) {
+                return false;
+            }
+            if (ggml_metal_op_flash_attn_ext_use_vec(op)) {
+                return has_simdgroup_reduction;
+            }
+            return op->src[1]->type == GGML_TYPE_F16 &&
+                   ((op->src[0]->ne[0] ==  64 && op->src[2]->ne[0] ==  64) ||
+                    (op->src[0]->ne[0] == 128 && op->src[2]->ne[0] == 128) ||
+                    (op->src[0]->ne[0] == 256 && op->src[2]->ne[0] == 256) ||
+                    (op->src[0]->ne[0] == 512 && op->src[2]->ne[0] == 512) ||
+                    (op->src[0]->ne[0] == 576 && op->src[2]->ne[0] == 512));
         case GGML_OP_LIGHTNING_INDEXER:
             if (op->src[0]->ne[0] != OP_LIGHTNING_INDEXER_DK ||
                 op->src[0]->ne[1] != OP_LIGHTNING_INDEXER_NH) {

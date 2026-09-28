@@ -289,6 +289,7 @@ struct ggml_metal_device_props {
     bool has_simdgroup_reduction;
     bool has_simdgroup_mm;
     bool has_unified_memory;
+    bool is_amd_5600m;
     bool has_bfloat;
     bool has_tensor;
     bool use_residency_sets;
